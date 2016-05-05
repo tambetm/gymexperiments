@@ -13,7 +13,7 @@ parser.add_argument('--hidden_size', type=int, default=100)
 #parser.add_argument('--batch_norm', action="store_true", default=False)
 parser.add_argument('--min_train', type=int, default=10)
 parser.add_argument('--train_repeat', type=int, default=10)
-parser.add_argument('--gamma', type=float, default=0.9)
+parser.add_argument('--gamma', type=float, default=1)
 #parser.add_argument('--tau', type=float, default=1.0)
 parser.add_argument('--episodes', type=int, default=200)
 parser.add_argument('--max_timesteps', type=int, default=200)
@@ -22,6 +22,8 @@ parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
 #parser.add_argument('--optimizer_lr', type=float, default=0.001)
 parser.add_argument('--exploration', type=float, default=0.1)
 parser.add_argument('--advantage', choices=['naive', 'max', 'avg'], default='naive')
+parser.add_argument('--display', action='store_true', default=True)
+parser.add_argument('--no-display', dest='display', action='store_false')
 parser.add_argument('--gym_monitor')
 parser.add_argument('environment')
 args = parser.parse_args()
@@ -60,7 +62,8 @@ for i_episode in xrange(args.episodes):
     observation = env.reset()
     episode_reward = 0
     for t in xrange(args.max_timesteps):
-        env.render()
+        if args.display:
+          env.render()
 
         if np.random.random() < args.exploration:
           action = env.action_space.sample()
