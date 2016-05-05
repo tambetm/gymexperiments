@@ -22,8 +22,10 @@ parser.add_argument('--max_timesteps', type=int, default=200)
 parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
 parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
 parser.add_argument('--optimizer_lr', type=float, default=0.001)
-parser.add_argument('--noise', choices=['linear', 'exp', 'fixed'], default='linear')
+parser.add_argument('--noise_decay', choices=['linear', 'exp', 'fixed'], default='linear')
 parser.add_argument('--fixed_noise', type=float, default=0.1)
+parser.add_argument('--display', action='store_true', default=True)
+parser.add_argument('--no-display', dest='display', action='store_false')
 parser.add_argument('--gym_monitor')
 parser.add_argument('environment')
 args = parser.parse_args()
@@ -33,6 +35,7 @@ assert isinstance(env.observation_space, Box)
 assert isinstance(env.action_space, Box)
 assert len(env.action_space.shape) == 1
 num_actuators = env.action_space.shape[0]
+
 if args.gym_monitor:
   env.monitor.start(args.gym_monitor)
 
@@ -104,15 +107,16 @@ for i_episode in xrange(args.episodes):
     #print "initial state:", observation
     episode_reward = 0
     for t in xrange(args.max_timesteps):
-        env.render()
+        if args.display:
+          env.render()
 
         x = np.array([observation])
         u = mu(x)
-        if args.noise == 'linear':
+        if args.noise_decay == 'linear':
           noise = 1. / (i_episode + 1)
-        elif args.noise == 'exp':
+        elif args.noise_decay == 'exp':
           noise = 10 ** -i_episode
-        elif args.noise == 'fixed':
+        elif args.noise_decay == 'fixed':
           noise = args.fixed_noise
         else:
           assert False
