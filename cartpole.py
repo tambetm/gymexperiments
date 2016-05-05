@@ -26,7 +26,7 @@ parser.add_argument('--exploration', type=float, default=0.1)
 parser.add_argument('--advantage', choices=['naive', 'max', 'avg'], default='naive')
 parser.add_argument('--display', action='store_true', default=True)
 parser.add_argument('--no_display', dest='display', action='store_false')
-parser.add_argument('--gym_monitor')
+parser.add_argument('--gym_record')
 parser.add_argument('environment')
 args = parser.parse_args()
 
@@ -34,8 +34,8 @@ env = gym.make(args.environment)
 assert isinstance(env.observation_space, Box)
 assert isinstance(env.action_space, Discrete)
 
-if args.gym_monitor:
-  env.monitor.start(args.gym_monitor)
+if args.gym_record:
+  env.monitor.start(args.gym_record)
 
 def createLayers():
   x = Input(shape=env.observation_space.shape)
@@ -132,5 +132,5 @@ for i_episode in xrange(args.episodes):
 
 print "Average reward per episode {}".format(total_reward / args.episodes)
 
-if args.gym_monitor:
+if args.gym_record:
   env.monitor.close()

@@ -21,10 +21,10 @@ parser.add_argument('--gamma', type=float, default=0.9)
 parser.add_argument('--tau', type=float, default=0.001)
 parser.add_argument('--episodes', type=int, default=200)
 parser.add_argument('--max_timesteps', type=int, default=200)
-parser.add_argument('--activation', choices=['tanh', 'relu'], default='relu')
+parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
 parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
 parser.add_argument('--optimizer_lr', type=float, default=0.001)
-parser.add_argument('--noise_decay', choices=['linear', 'exp', 'fixed'], default='linear')
+parser.add_argument('--noise', choices=['linear_decay', 'exp_decay', 'fixed'], default='linear_decay')
 parser.add_argument('--fixed_noise', type=float, default=0.1)
 parser.add_argument('--display', action='store_true', default=True)
 parser.add_argument('--no_display', dest='display', action='store_false')
@@ -136,11 +136,11 @@ for i_episode in xrange(args.episodes):
 
         x = np.array([observation])
         u = mu(x)
-        if args.noise_decay == 'linear':
+        if args.noise == 'linear_decay':
           noise = 1. / (i_episode + 1)
-        elif args.noise_decay == 'exp':
+        elif args.noise == 'exp_decay':
           noise = 10 ** -i_episode
-        elif args.noise_decay == 'fixed':
+        elif args.noise == 'fixed':
           noise = args.fixed_noise
         else:
           assert False
