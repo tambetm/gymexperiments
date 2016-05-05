@@ -3,18 +3,20 @@ import gym
 from gym.spaces import Box, Discrete
 from keras.models import Model
 from keras.layers import Input, Dense, Lambda
+from keras.layers.normalization import BatchNormalization
 from keras import backend as K
 import numpy as np
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=100)
 parser.add_argument('--hidden_size', type=int, default=100)
-#parser.add_argument('--layers', type=int, default=2)
-#parser.add_argument('--batch_norm', action="store_true", default=False)
+parser.add_argument('--layers', type=int, default=1)
+parser.add_argument('--batch_norm', action="store_true", default=False)
+parser.add_argument('--no_batch_norm', action="store_false", dest='batch_norm')
 parser.add_argument('--min_train', type=int, default=10)
 parser.add_argument('--train_repeat', type=int, default=10)
-parser.add_argument('--gamma', type=float, default=1)
-#parser.add_argument('--tau', type=float, default=1.0)
+parser.add_argument('--gamma', type=float, default=0.9)
+parser.add_argument('--tau', type=float, default=0.001)
 parser.add_argument('--episodes', type=int, default=200)
 parser.add_argument('--max_timesteps', type=int, default=200)
 parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
@@ -23,7 +25,7 @@ parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
 parser.add_argument('--exploration', type=float, default=0.1)
 parser.add_argument('--advantage', choices=['naive', 'max', 'avg'], default='naive')
 parser.add_argument('--display', action='store_true', default=True)
-parser.add_argument('--no-display', dest='display', action='store_false')
+parser.add_argument('--no_display', dest='display', action='store_false')
 parser.add_argument('--gym_monitor')
 parser.add_argument('environment')
 args = parser.parse_args()
@@ -35,21 +37,36 @@ assert isinstance(env.action_space, Discrete)
 if args.gym_monitor:
   env.monitor.start(args.gym_monitor)
 
-x = Input(shape=env.observation_space.shape)
-h = Dense(args.hidden_size, activation=args.activation)(x)
-y = Dense(env.action_space.n + 1)(h)
-if args.advantage == 'avg':
-  z = Lambda(lambda a: K.expand_dims(a[:,0], dim=-1) + a[:,1:] - K.mean(a[:, 1:], keepdims=True), output_shape=(env.action_space.n,))(y)
-elif args.advantage == 'max':
-  z = Lambda(lambda a: K.expand_dims(a[:,0], dim=-1) + a[:,1:] - K.max(a[:, 1:], keepdims=True), output_shape=(env.action_space.n,))(y)
-elif args.advantage == 'naive':
-  z = Lambda(lambda a: K.expand_dims(a[:,0], dim=-1) + a[:,1:], output_shape=(env.action_space.n,))(y)
-else:
-  assert False
+def createLayers():
+  x = Input(shape=env.observation_space.shape)
+  if args.batch_norm:
+    h = BatchNormalization()(x)
+  else:
+    h = x
+  for i in xrange(args.layers):
+    h = Dense(args.hidden_size, activation=args.activation)(h)
+    if args.batch_norm and i != args.layers - 1:
+      h = BatchNormalization()(h)
+  y = Dense(env.action_space.n + 1)(h)
+  if args.advantage == 'avg':
+    z = Lambda(lambda a: K.expand_dims(a[:,0], dim=-1) + a[:,1:] - K.mean(a[:, 1:], keepdims=True), output_shape=(env.action_space.n,))(y)
+  elif args.advantage == 'max':
+    z = Lambda(lambda a: K.expand_dims(a[:,0], dim=-1) + a[:,1:] - K.max(a[:, 1:], keepdims=True), output_shape=(env.action_space.n,))(y)
+  elif args.advantage == 'naive':
+    z = Lambda(lambda a: K.expand_dims(a[:,0], dim=-1) + a[:,1:], output_shape=(env.action_space.n,))(y)
+  else:
+    assert False
 
+  return x, z
+
+x, z = createLayers()
 model = Model(input=x, output=z)
 model.summary()
 model.compile(optimizer='adam', loss='mse')
+
+x, z = createLayers()
+target_model = Model(input=x, output=z)
+target_model.set_weights(model.get_weights())
 
 prestates = []
 actions = []
@@ -100,6 +117,12 @@ for i_episode in xrange(args.episodes):
               else:
                 qpre[i, actions[indexes[i]]] = rewards[indexes[i]] + args.gamma * np.amax(qpost[i])
             model.train_on_batch(np.array(prestates)[indexes], qpre)
+
+            weights = model.get_weights()
+            target_weights = target_model.get_weights()
+            for i in xrange(len(weights)):
+              target_weights[i] = args.tau * weights[i] + (1 - args.tau) * target_weights[i]
+            target_model.set_weights(target_weights)
 
         if done:
             break
