@@ -47,7 +47,7 @@ if num_actuators == 1:
     return K.exp(x)
 
   def _P(x):
-    return x*x
+    return x**2
 
   def _A(t):
     m, p, u = t
@@ -97,22 +97,25 @@ def createLayers():
     h = Dense(args.hidden_size, activation=args.activation, name='h'+str(i+1))(h)
     if args.batch_norm and i != args.layers - 1:
       h = BatchNormalization()(h)
-  v = Dense(1, init='uniform', name='v')(h)
-  m = Dense(num_actuators, init='uniform', name='m')(h)
+  v = Dense(1, name='v')(h)
+  m = Dense(num_actuators, name='m')(h)
   l0 = Dense(num_actuators * (num_actuators + 1)/2, name='l0')(h)
   l = Lambda(_L, output_shape=(num_actuators, num_actuators), name='l')(l0)
   p = Lambda(_P, output_shape=(num_actuators, num_actuators), name='p')(l)
   a = merge([m, p, u], mode=_A, output_shape=(None, num_actuators,), name="a")
   q = merge([v, a], mode=_Q, output_shape=(None, num_actuators,), name="q")
-  return x, u, m, v, q, p
+  return x, u, m, v, q, p, a
 
-x, u, m, v, q, p = createLayers()
+x, u, m, v, q, p, a = createLayers()
 
 fmu = K.function([K.learning_phase(), x], m)
 mu = lambda x: fmu([0, x])
 
 fP = K.function([K.learning_phase(), x], p)
 P = lambda x: fP([0, x])
+
+fA = K.function([K.learning_phase(), x, u], a)
+A = lambda x, u: fA([0, x, u])
 
 fQ = K.function([K.learning_phase(), x, u], q)
 Q = lambda x, u: fQ([0, x, u])
@@ -128,7 +131,7 @@ else:
   assert False
 model.compile(optimizer=optimizer, loss='mse')
 
-x, u, m, v, q, p = createLayers()
+x, u, m, v, q, p, a = createLayers()
 
 fV = K.function([K.learning_phase(), x], v)
 V = lambda x: fV([0, x])
@@ -161,17 +164,17 @@ for i_episode in xrange(args.episodes):
           action = u + np.random.randn(num_actuators) * args.noise_scale
         elif args.noise == 'covariance':
           if num_actuators == 1:
-            std = args.noise_scale / P(x)[0]
+            std = np.minimum(args.noise_scale / P(x)[0], 1)
             #print "std:", std
             action = np.random.normal(u, std, size=(1,))
           else:
-            cov = np.linalg.inv(P(x)[0]) * args.noise_scale
+            cov = np.minimum(np.linalg.inv(P(x)[0]) * args.noise_scale, 1)
             #print "covariance:", cov
             action = np.random.multivariate_normal(u, cov)
         else:
           assert False
-        #print "action:", action
-        #print "q:", Q(x, np.array([action]))
+        #print "action:", action, "Q:", Q(x, np.array([action])), "V:", V(x)
+        #print "action:", action, "advantage:", A(x, np.array([action]))
 
         prestates.append(observation)
         actions.append(action)
@@ -185,8 +188,10 @@ for i_episode in xrange(args.episodes):
         rewards.append(reward)
         poststates.append(observation)
         terminals.append(done)
+        #print "done:", done
 
         if len(prestates) > args.min_train:
+          loss = 0
           for k in xrange(args.train_repeat):
             if len(prestates) > args.batch_size:
               indexes = np.random.choice(len(prestates), size=args.batch_size)
@@ -195,13 +200,14 @@ for i_episode in xrange(args.episodes):
 
             v = V(np.array(poststates)[indexes])
             y = np.array(rewards)[indexes] + args.gamma * np.squeeze(v)
-            model.train_on_batch([np.array(prestates)[indexes], np.array(actions)[indexes]], y)
+            loss += model.train_on_batch([np.array(prestates)[indexes], np.array(actions)[indexes]], y)
 
             weights = model.get_weights()
             target_weights = target_model.get_weights()
             for i in xrange(len(weights)):
               target_weights[i] = args.tau * weights[i] + (1 - args.tau) * target_weights[i]
             target_model.set_weights(target_weights)
+          #print "average loss:", loss/k
 
         if done:
             break
