@@ -37,6 +37,7 @@ assert isinstance(env.observation_space, Box)
 assert isinstance(env.action_space, Box)
 assert len(env.action_space.shape) == 1
 num_actuators = env.action_space.shape[0]
+print "num_actuators:", num_actuators
 
 if args.gym_record:
   env.monitor.start(args.gym_record)
@@ -57,16 +58,29 @@ if num_actuators == 1:
     return v + a
 else:
   def L(x):
-    # TODO: batching
-    #return T.nlinalg.alloc_diag(K.exp(T.nlinalg.ExtractDiag(view=True)(x))) + T.tril(x, k=-1)
-    return K.exp(x)
+    # initialize with zeros
+    batch_size = x.shape[0]
+    a = T.zeros((batch_size, num_actuators, num_actuators))
+    # set diagonal elements
+    batch_idx = T.extra_ops.repeat(T.arange(batch_size), num_actuators)
+    diag_idx = T.tile(T.arange(num_actuators), batch_size)
+    b = T.set_subtensor(a[batch_idx, diag_idx, diag_idx], T.flatten(T.exp(x[:, :num_actuators])))
+    # set lower triangle
+    cols = np.concatenate([np.array(range(i), dtype=np.uint) for i in xrange(num_actuators)])
+    rows = np.concatenate([np.array([i]*i, dtype=np.uint) for i in xrange(num_actuators)])
+    cols_idx = T.tile(T.as_tensor_variable(cols), batch_size)
+    rows_idx = T.tile(T.as_tensor_variable(rows), batch_size)
+    batch_idx = T.extra_ops.repeat(T.arange(batch_size), len(cols))
+    c = T.set_subtensor(b[batch_idx, rows_idx, cols_idx], T.flatten(x[:, num_actuators:]))
+    return c
 
   def P(x):
     return K.batch_dot(x, K.permute_dimensions(x, (0,2,1)))
 
   def A(t):
     m, p, u = t
-    return -K.batch_dot(K.batch_dot(K.permute_dimensions(u - m, (0,2,1)), p), u - m)
+    d = K.expand_dims(u - m, -1)
+    return -K.batch_dot(K.batch_dot(K.permute_dimensions(d, (0,2,1)), p), d)
 
   def Q(t):
     v, a = t
@@ -85,8 +99,7 @@ def createLayers():
       h = BatchNormalization()(h)
   v = Dense(1, init='uniform', name='v')(h)
   m = Dense(num_actuators, init='uniform', name='m')(h)
-  l = Dense(num_actuators**2, name='l0')(h)
-  l = Reshape((num_actuators, num_actuators))(l)
+  l = Dense(num_actuators * (num_actuators + 1)/2, name='l0')(h)
   l = Lambda(L, output_shape=(num_actuators, num_actuators), name='l')(l)
   p = Lambda(P, output_shape=(num_actuators, num_actuators), name='p')(l)
   a = merge([m, p, u], mode=A, output_shape=(None, num_actuators,), name="a")
@@ -96,7 +109,10 @@ def createLayers():
 x, u, m, v, q = createLayers()
 
 _mu = K.function([K.learning_phase(), x], m)
-mu = lambda x: _mu([0] + [x])
+mu = lambda x: _mu([0, x])
+
+_Q2 = K.function([K.learning_phase(), x, u], q)
+Q2 = lambda x, u: _Q2([0, x, u])
 
 model = Model(input=[x,u], output=q)
 model.summary()
@@ -112,9 +128,7 @@ model.compile(optimizer=optimizer, loss='mse')
 x, u, m, v, q = createLayers()
 
 _V = K.function([K.learning_phase(), x], v)
-V = lambda x: _V([0] + [x])
-
-#q_f = K.function([x, u], q)
+V = lambda x: _V([0, x])
 
 target_model = Model(input=[x,u], output=q)
 target_model.set_weights(model.get_weights())
@@ -146,7 +160,7 @@ for i_episode in xrange(args.episodes):
           assert False
         #print "noise:", noise
         action = u[0] + np.random.randn(num_actuators) * noise
-        #print "action:", action
+        #print "action:", action, "q:", Q2(x, np.array([action]))
 
         prestates.append(observation)
         actions.append(action)
@@ -181,8 +195,7 @@ for i_episode in xrange(args.episodes):
         if done:
             break
 
-    episode_reward = episode_reward / float(t + 1) 
-    print "Episode {} finished after {} timesteps, average reward {}".format(i_episode + 1, t + 1, episode_reward)
+    print "Episode {} finished after {} timesteps, reward {}".format(i_episode + 1, t + 1, episode_reward)
     total_reward += episode_reward
 
 print "Average reward per episode {}".format(total_reward / args.episodes)
