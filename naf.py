@@ -17,15 +17,15 @@ parser.add_argument('--batch_norm', action="store_true", default=False)
 parser.add_argument('--no_batch_norm', action="store_false", dest="batch_norm")
 parser.add_argument('--min_train', type=int, default=10)
 parser.add_argument('--train_repeat', type=int, default=10)
-parser.add_argument('--gamma', type=float, default=0.9)
+parser.add_argument('--gamma', type=float, default=0.99)
 parser.add_argument('--tau', type=float, default=0.001)
 parser.add_argument('--episodes', type=int, default=200)
 parser.add_argument('--max_timesteps', type=int, default=200)
 parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
 parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
 parser.add_argument('--optimizer_lr', type=float, default=0.001)
-parser.add_argument('--noise', choices=['linear_decay', 'exp_decay', 'fixed'], default='linear_decay')
-parser.add_argument('--fixed_noise', type=float, default=0.1)
+parser.add_argument('--noise', choices=['linear_decay', 'exp_decay', 'fixed', 'covariance'], default='covariance')
+parser.add_argument('--noise_scale', type=float, default=0.001)
 parser.add_argument('--display', action='store_true', default=True)
 parser.add_argument('--no_display', dest='display', action='store_false')
 parser.add_argument('--gym_record')
@@ -43,21 +43,21 @@ if args.gym_record:
   env.monitor.start(args.gym_record)
 
 if num_actuators == 1:
-  def L(x):
+  def _L(x):
     return K.exp(x)
 
-  def P(x):
+  def _P(x):
     return x*x
 
-  def A(t):
+  def _A(t):
     m, p, u = t
     return -(u - m)**2 * p
 
-  def Q(t):
+  def _Q(t):
     v, a = t
     return v + a
 else:
-  def L(x):
+  def _L(x):
     # initialize with zeros
     batch_size = x.shape[0]
     a = T.zeros((batch_size, num_actuators, num_actuators))
@@ -74,15 +74,15 @@ else:
     c = T.set_subtensor(b[batch_idx, rows_idx, cols_idx], T.flatten(x[:, num_actuators:]))
     return c
 
-  def P(x):
+  def _P(x):
     return K.batch_dot(x, K.permute_dimensions(x, (0,2,1)))
 
-  def A(t):
+  def _A(t):
     m, p, u = t
     d = K.expand_dims(u - m, -1)
     return -K.batch_dot(K.batch_dot(K.permute_dimensions(d, (0,2,1)), p), d)
 
-  def Q(t):
+  def _Q(t):
     v, a = t
     return v + a
 
@@ -99,20 +99,23 @@ def createLayers():
       h = BatchNormalization()(h)
   v = Dense(1, init='uniform', name='v')(h)
   m = Dense(num_actuators, init='uniform', name='m')(h)
-  l = Dense(num_actuators * (num_actuators + 1)/2, name='l0')(h)
-  l = Lambda(L, output_shape=(num_actuators, num_actuators), name='l')(l)
-  p = Lambda(P, output_shape=(num_actuators, num_actuators), name='p')(l)
-  a = merge([m, p, u], mode=A, output_shape=(None, num_actuators,), name="a")
-  q = merge([v, a], mode=Q, output_shape=(None, num_actuators,), name="q")
-  return x, u, m, v, q
+  l0 = Dense(num_actuators * (num_actuators + 1)/2, name='l0')(h)
+  l = Lambda(_L, output_shape=(num_actuators, num_actuators), name='l')(l0)
+  p = Lambda(_P, output_shape=(num_actuators, num_actuators), name='p')(l)
+  a = merge([m, p, u], mode=_A, output_shape=(None, num_actuators,), name="a")
+  q = merge([v, a], mode=_Q, output_shape=(None, num_actuators,), name="q")
+  return x, u, m, v, q, p
 
-x, u, m, v, q = createLayers()
+x, u, m, v, q, p = createLayers()
 
-_mu = K.function([K.learning_phase(), x], m)
-mu = lambda x: _mu([0, x])
+fmu = K.function([K.learning_phase(), x], m)
+mu = lambda x: fmu([0, x])
 
-_Q2 = K.function([K.learning_phase(), x, u], q)
-Q2 = lambda x, u: _Q2([0, x, u])
+fP = K.function([K.learning_phase(), x], p)
+P = lambda x: fP([0, x])
+
+fQ = K.function([K.learning_phase(), x, u], q)
+Q = lambda x, u: fQ([0, x, u])
 
 model = Model(input=[x,u], output=q)
 model.summary()
@@ -125,10 +128,10 @@ else:
   assert False
 model.compile(optimizer=optimizer, loss='mse')
 
-x, u, m, v, q = createLayers()
+x, u, m, v, q, p = createLayers()
 
-_V = K.function([K.learning_phase(), x], v)
-V = lambda x: _V([0, x])
+fV = K.function([K.learning_phase(), x], v)
+V = lambda x: fV([0, x])
 
 target_model = Model(input=[x,u], output=q)
 target_model.set_weights(model.get_weights())
@@ -149,18 +152,26 @@ for i_episode in xrange(args.episodes):
           env.render()
 
         x = np.array([observation])
-        u = mu(x)
+        u = mu(x)[0]
         if args.noise == 'linear_decay':
-          noise = 1. / (i_episode + 1)
+          action = u + np.random.randn(num_actuators) / (i_episode + 1)
         elif args.noise == 'exp_decay':
-          noise = 10 ** -i_episode
+          action = u + np.random.randn(num_actuators) * 10 ** -i_episode
         elif args.noise == 'fixed':
-          noise = args.fixed_noise
+          action = u + np.random.randn(num_actuators) * args.noise_scale
+        elif args.noise == 'covariance':
+          if num_actuators == 1:
+            std = args.noise_scale / P(x)[0]
+            #print "std:", std
+            action = np.random.normal(u, std, size=(1,))
+          else:
+            cov = np.linalg.inv(P(x)[0]) * args.noise_scale
+            #print "covariance:", cov
+            action = np.random.multivariate_normal(u, cov)
         else:
           assert False
-        #print "noise:", noise
-        action = u[0] + np.random.randn(num_actuators) * noise
-        #print "action:", action, "q:", Q2(x, np.array([action]))
+        #print "action:", action
+        #print "q:", Q(x, np.array([action]))
 
         prestates.append(observation)
         actions.append(action)
