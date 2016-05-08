@@ -27,6 +27,10 @@ class Buffer:
     self.count = max(self.count, self.current + 1)
     self.current = (self.current + 1) % self.size
 
+  def addBatch(self, preobs, actions, rewards, postobs, terminals):
+    for preob, action, reward, postob, terminal in zip(preobs, actions, rewards, postobs, terminals):
+      self.add(preob, action, reward, postob, terminal)
+
   def sample(self, batch_size):
     assert self.count > 0
     indexes = np.random.choice(self.count, size=batch_size)

@@ -10,7 +10,9 @@ from keras.optimizers import Adam, RMSprop
 from keras import backend as K
 import theano.tensor as T
 import numpy as np
-from buffer import Buffer, TimeBuffer
+from buffer import Buffer
+from irmodel import TimeBuffer, IRModel
+from copy import deepcopy
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=100)
@@ -23,10 +25,12 @@ parser.add_argument('--unit_norm', action='store_true', default=False)
 parser.add_argument('--l2_reg', type=float)
 parser.add_argument('--l1_reg', type=float)
 parser.add_argument('--replay_size', type=int, default=100000)
-parser.add_argument('--train_repeat', type=int, default=10)
+parser.add_argument('--train_repeat', type=int, default=5)
 parser.add_argument('--gamma', type=float, default=0.99)
 parser.add_argument('--tau', type=float, default=0.001)
 parser.add_argument('--episodes', type=int, default=200)
+parser.add_argument('--ir_episodes', type=int, default=5)
+parser.add_argument('--ir_steps', type=int, default=5)
 parser.add_argument('--max_timesteps', type=int, default=200)
 parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
 parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
@@ -182,6 +186,11 @@ R = Buffer(args.replay_size, env.observation_space.shape, env.action_space.shape
 Rf = Buffer(args.replay_size, env.observation_space.shape, env.action_space.shape)
 
 # time-varied linear model buffers
+B = TimeBuffer(args.max_timesteps, args.ir_episodes, env.observation_space.shape, env.action_space.shape)
+Bold = None
+
+# model for imagination rollout
+ir_model = IRModel(args.max_timesteps)
 
 # the main learning loop
 total_reward = 0
@@ -226,13 +235,36 @@ for i_episode in xrange(args.episodes):
         #print "reward:", reward
         #print "poststate:", observation
 
-        # add experience to replay memory
+        # add experience to replay memory and IR buffer
         R.add(x[0], action, reward, observation, done)
+        B.add(x[0], action, reward, observation, done)
+
+        # perform imagination rollouts
+        if (i_episode * args.max_timesteps + t) % args.batch_size == 0 and \
+            ir_model.supported_timesteps() > args.ir_steps:
+          print "Performing imagination rollout for", args.ir_steps, "steps"
+          preobs, timesteps = Bold.sample(args.batch_size, ir_model.supported_timesteps() - args.ir_steps)
+          for i in xrange(args.ir_steps):
+            actions = mu(preobs) # TODO: add noise?
+            postobs, rewards, terminals = ir_model.predict(preobs, actions, timesteps + i)
+            Rf.addBatch(preobs, actions, rewards, postobs, terminals)
+            #print "prediction:", preobs[0], timesteps[0], postobs[0]
+            preobs = postobs
+          print "Done, fictional replay memory now contains", Rf.count, "experiences"
+          print "For comparison, real replay memory contains", R.count, "experiences"
 
         loss = 0
         # perform train_repeat Q-updates
-        for k in xrange(args.train_repeat):
-          preobs, actions, rewards, postobs, terminals = R.sample(args.batch_size)
+        for k in xrange(args.train_repeat*(args.ir_steps + 1)):
+          # sample minibatches from fictional replay memory first and then from real
+          if k < args.train_repeat * args.ir_steps:
+            if Rf.count == 0:
+              continue
+            #print "Sampling from fictional replay memory", args.batch_size, "samples"
+            preobs, actions, rewards, postobs, terminals = Rf.sample(args.batch_size)
+          else:
+            #print "Sampling from real replay memory", args.batch_size, "samples"
+            preobs, actions, rewards, postobs, terminals = R.sample(args.batch_size)
 
           # Q-update
           v = V(postobs)
@@ -252,6 +284,16 @@ for i_episode in xrange(args.episodes):
 
     print "Episode {} finished after {} timesteps, reward {}".format(i_episode + 1, t + 1, episode_reward)
     total_reward += episode_reward
+    B.new_episode()
+
+    # train imagination rollout model
+    if B.is_full():
+      print "Fitting imagination rollout model..."
+      ir_model.fit(B.preobs, B.actions, B.rewards, B.postobs, B.terminals, B.lengths)
+      print "Done fitting,", ir_model.supported_timesteps(), "timesteps covered."
+      Bold = deepcopy(B)
+      B.reset()
+
 
 print "Average reward per episode {}".format(total_reward / args.episodes)
 
