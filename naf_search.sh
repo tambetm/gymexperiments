@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-defaults="--batch_norm --optmizer_lr 0.0001 --noise fixed --noise_scale 0.01 --tau 1 --l2_reg 0.001"
+defaults="--batch_norm --optimizer_lr 0.0001 --noise fixed --noise_scale 0.01 --tau 1 --l2_reg 0.001"
 
 python naf.py $defaults --gym_record ${1}_reference $*
 #python naf.py $defaults --batch_norm --gym_record ${1}_batchnorm $*
