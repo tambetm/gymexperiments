@@ -4,7 +4,7 @@ from gym.spaces import Box, Discrete
 from keras.models import Model
 from keras.layers import Input, Dense, Lambda, Reshape, merge
 from keras.layers.normalization import BatchNormalization
-from keras.regularizers import l2, activity_l2
+from keras.regularizers import l2, l1
 from keras.constraints import maxnorm, unitnorm
 from keras.optimizers import Adam, RMSprop
 from keras import backend as K
