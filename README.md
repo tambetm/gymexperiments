@@ -4,7 +4,7 @@ My implementations of [normalized advantage functions](http://arxiv.org/abs/1603
 
 Example results with NAF:
  * [InvertedPendulum-v1](https://gym.openai.com/evaluations/eval_CzoNQdPSAm0J3ikTBSTCg)
- * [Pendulum-v0](https://gym.openai.com/evaluations/eval_gyzqV97QESg0M6WrUsiIQ)
+ * [Pendulum-v0](https://gym.openai.com/evaluations/eval_IU3wehAQQRuJRbzMjy26QQ)
  
 Example results with DUEL:
  * [CartPole-v0](https://gym.openai.com/evaluations/eval_sOUmkzSy26GIWJ5IIQeA)
