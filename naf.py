@@ -10,6 +10,7 @@ from keras.optimizers import Adam, RMSprop
 from keras import backend as K
 import theano.tensor as T
 import numpy as np
+from buffer import Buffer
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=100)
@@ -21,7 +22,7 @@ parser.add_argument('--max_norm', type=int)
 parser.add_argument('--unit_norm', action='store_true', default=False)
 parser.add_argument('--l2_reg', type=float)
 parser.add_argument('--l1_reg', type=float)
-parser.add_argument('--min_train', type=int, default=10)
+parser.add_argument('--replay_size', type=int, default=100000)
 parser.add_argument('--train_repeat', type=int, default=10)
 parser.add_argument('--gamma', type=float, default=0.99)
 parser.add_argument('--tau', type=float, default=0.001)
@@ -177,11 +178,7 @@ target_model = Model(input=[x,u], output=q)
 target_model.set_weights(model.get_weights())
 
 # replay memory
-prestates = []
-actions = []
-rewards = []
-poststates = []
-terminals = []
+R = Buffer(args.replay_size, env.observation_space.shape, env.action_space.shape)
 
 # the main learning loop
 total_reward = 0
@@ -220,46 +217,32 @@ for i_episode in xrange(args.episodes):
         #print "mu:", u, "action:", action
         #print "Q(mu):", Q(x, np.array([u])), "Q(action):", Q(x, np.array([action]))
 
-        # add current observation and action to replay memory
-        prestates.append(observation)
-        actions.append(action)
-        #print "prestate:", observation
-
         # take the action and record reward
         observation, reward, done, info = env.step(action)
         episode_reward += reward
         #print "reward:", reward
         #print "poststate:", observation
 
-        # add reward, resulting observation and terminal indicator to replay memory
-        rewards.append(reward)
-        poststates.append(observation)
-        terminals.append(done)
-        #print "done:", done
+        # add experience to replay memory
+        R.add(x[0], action, reward, observation, done)
 
-        # start training after min_train experiences are recorded in replay memory
-        if len(prestates) > args.min_train:
-          loss = 0
-          # perform train_repeat Q-updates
-          for k in xrange(args.train_repeat):
-            # if less experiences than batch size, then use all of them
-            if len(prestates) > args.batch_size:
-              indexes = np.random.choice(len(prestates), size=args.batch_size)
-            else:
-              indexes = range(len(prestates))
+        loss = 0
+        # perform train_repeat Q-updates
+        for k in xrange(args.train_repeat):
+          preobs, actions, rewards, postobs, terminals = R.sample(args.batch_size)
 
-            # Q-update
-            v = V(np.array(poststates)[indexes])
-            y = np.array(rewards)[indexes] + args.gamma * np.squeeze(v)
-            loss += model.train_on_batch([np.array(prestates)[indexes], np.array(actions)[indexes]], y)
+          # Q-update
+          v = V(postobs)
+          y = rewards + args.gamma * np.squeeze(v)
+          loss += model.train_on_batch([preobs, actions], y)
 
-            # copy weights to target model, averaged by tau
-            weights = model.get_weights()
-            target_weights = target_model.get_weights()
-            for i in xrange(len(weights)):
-              target_weights[i] = args.tau * weights[i] + (1 - args.tau) * target_weights[i]
-            target_model.set_weights(target_weights)
-          #print "average loss:", loss/k
+          # copy weights to target model, averaged by tau
+          weights = model.get_weights()
+          target_weights = target_model.get_weights()
+          for i in xrange(len(weights)):
+            target_weights[i] = args.tau * weights[i] + (1 - args.tau) * target_weights[i]
+          target_model.set_weights(target_weights)
+        #print "average loss:", loss/k
 
         if done:
             break
