@@ -20,6 +20,8 @@ for n in xrange(args.trials):
     else:
       cmd_args.append(arg)
   label = "_".join(cmd_args[args.label_skip:])
+  label = label.replace(' ', '_')
+  label = label.replace('--', '_')
   cmd_args.append(args.options)
   cmd_args.append('"'+label+'"')
   cmd_args.append('2>&1')
