@@ -29,26 +29,39 @@ parser.add_argument('--gym_record')
 parser.add_argument('environment')
 args = parser.parse_args()
 
+# create environment
 env = gym.make(args.environment)
 assert isinstance(env.observation_space, Box)
 assert isinstance(env.action_space, Discrete)
 
+# start recording for OpenAI Gym
 if args.gym_record:
   env.monitor.start(args.gym_record)
 
+# policy network
 h = x = Input(shape=env.observation_space.shape)
 for i in xrange(args.layers):
   h = Dense(args.hidden_size, activation=args.activation)(h)
 y = Dense(env.action_space.n, activation='softmax')(h)
+
+# additional branch to the network that calculates baseline (state-value)
+# do not propagate baseline gradient to the main network
 hh = K.stop_gradient(h)
+# hacks to convert K.stop_gradient() output to Keras tensor
 hh._keras_shape = h._keras_shape
 hh._keras_history = h._keras_history
+hh = Dense(args.hidden_size, activation=args.activation)(hh)
+# fully-connected layer to produce baseline
 b = Dense(1)(hh)
 
+# advantage is an additional input to the network
+# because advantage is a constant and we multiply loss with it,
+# it automatically propagates in the gradient formulas and does the right thing
 a = Input(shape=(1,))
 def policy_gradient_loss(l_sampled, l_predicted):
     return a * K.mean(categorical_crossentropy(l_sampled, l_predicted), axis=-1, keepdims=True)
 
+# create optimizer with optional learning rate parameter
 if args.optimizer == 'adam':
   if args.optimizer_lr is None:
     optimizer = 'adam'
@@ -62,13 +75,15 @@ elif args.optimizer == 'rmsprop':
 else:
   assert False
 
+# inputs to the model are obesvation and advantage,
+# outputs are action probabilities and baseline
 model = Model(input=[x, a], output=[y, b])
 model.summary()
+# baseline is optimized with MSE
 model.compile(optimizer='adam', loss=[policy_gradient_loss, mse],
   loss_weights=[1, args.tau])
 
 all_rewards = []
-
 total_reward = 0
 for i_episode in xrange(args.episodes):
     observations = []
@@ -82,25 +97,32 @@ for i_episode in xrange(args.episodes):
         if args.display:
           env.render()
 
+        # create inputs for batch size 1
         x = np.array([observation])
-        y, b = model.predict([x, np.zeros((1,1))], batch_size=1)
-        y /= np.sum(y)
+        a = np.zeros((1,1))
+        # predict action probabilities (and baseline state value)
+        y, b = model.predict([x, a], batch_size=1)
+        y /= np.sum(y)  # ensure y-s sum up to 1
         #print "y:", y
+        # sample action using those probabilities
         action = np.random.choice(env.action_space.n, p=y[0])
         #print "action:", action
 
+        # record observation, action and baseline
+        observations.append(observation)
+        actions.append(action)
+        baselines.append(b[0,0])
+
+        # make a step in environment
         observation, reward, done, info = env.step(action)
         episode_reward += reward
         #print "reward:", reward
-
-        observations.append(observation)
-        actions.append(action)
         rewards.append(reward)
-        baselines.append(b[0,0])
 
         if done:
             break
 
+    # calculate discounted future rewards for this episode
     discounted_future_rewards = []
     g = 0
     for r in reversed(rewards):
@@ -109,13 +131,17 @@ for i_episode in xrange(args.episodes):
     #print discounted_future_rewards
     all_rewards += discounted_future_rewards
 
+    # form training data from observations, actions and rewards
     x = np.array(observations)
     y = np_utils.to_categorical(actions, env.action_space.n)
     r = np.array(discounted_future_rewards)
+    # if tau == 0, don't use baseline functionality
     if args.tau == 0:
+      # instead calculate baseline as average of discounted future rewards 
       b = np.mean(all_rewards[-args.average_over:])
       #b = float(total_reward) / (i_episode + 1)
     else:
+      # otherwise use baseline predictions
       b = np.array(baselines)
     #print x.shape, y.shape, r.shape, b.shape
     #print "x:", x
@@ -123,6 +149,9 @@ for i_episode in xrange(args.episodes):
     #print "r:", r
     print "b:", b
     #print "a:", r - b
+    # train the model, using discounted future rewards - baseline as advantage,
+    # sampled actions as targets for actions and discounted future rewards as targets for baseline
+    # the hope is the baseline is tracking average discounted future reward for this observation (state value)
     model.train_on_batch([x, r - b], [y, r])
     #model.fit([x, r - b], [y, r], batch_size=args.batch_size, nb_epoch=args.repeat_train)
 
