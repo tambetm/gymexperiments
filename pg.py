@@ -2,8 +2,7 @@ import argparse
 import gym
 from gym.spaces import Box, Discrete
 from keras.models import Model
-from keras.layers import Input, Dense, Lambda
-from keras.layers.normalization import BatchNormalization
+from keras.layers import Input, Dense
 from keras.optimizers import Adam, RMSprop
 from keras.objectives import categorical_crossentropy, mse
 from keras.utils import np_utils
@@ -20,8 +19,8 @@ parser.add_argument('--max_timesteps', type=int, default=200)
 parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
 parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
 parser.add_argument('--optimizer_lr', type=float, default=0.01)
-#parser.add_argument('--batch_size', type=int, default=32)
-#parser.add_argument('--repeat_train', type=int, default=1)
+# parser.add_argument('--batch_size', type=int, default=32)
+# parser.add_argument('--repeat_train', type=int, default=1)
 parser.add_argument('--average_over', type=int, default=1000)
 parser.add_argument('--display', action='store_true', default=True)
 parser.add_argument('--no_display', dest='display', action='store_false')
@@ -36,44 +35,41 @@ assert isinstance(env.action_space, Discrete)
 
 # start recording for OpenAI Gym
 if args.gym_record:
-  env.monitor.start(args.gym_record)
+    env.monitor.start(args.gym_record)
 
 # policy network
 h = x = Input(shape=env.observation_space.shape)
 for i in xrange(args.layers):
-  h = Dense(args.hidden_size, activation=args.activation)(h)
+    h = Dense(args.hidden_size, activation=args.activation)(h)
 y = Dense(env.action_space.n, activation='softmax')(h)
 
 # additional branch to the network that calculates baseline (state-value)
-# do not propagate baseline gradient to the main network
-hh = K.stop_gradient(h)
-# hacks to convert K.stop_gradient() output to Keras tensor
-hh._keras_shape = h._keras_shape
-hh._keras_history = h._keras_history
-hh = Dense(args.hidden_size, activation=args.activation)(hh)
+h = Dense(args.hidden_size, activation=args.activation)(h)
 # fully-connected layer to produce baseline
-b = Dense(1)(hh)
+b = Dense(1)(h)
 
 # advantage is an additional input to the network
 # because advantage is a constant and we multiply loss with it,
 # it automatically propagates in the gradient formulas and does the right thing
 a = Input(shape=(1,))
+
+
 def policy_gradient_loss(l_sampled, l_predicted):
     return a * K.mean(categorical_crossentropy(l_sampled, l_predicted), axis=-1, keepdims=True)
 
 # create optimizer with optional learning rate parameter
 if args.optimizer == 'adam':
-  if args.optimizer_lr is None:
-    optimizer = 'adam'
-  else:
-    optimizer = Adam(lr = args.optimizer_lr)
+    if args.optimizer_lr is None:
+        optimizer = 'adam'
+    else:
+        optimizer = Adam(lr=args.optimizer_lr)
 elif args.optimizer == 'rmsprop':
-  if args.optimizer_lr is None:
-    optimizer = 'rmsprop'
-  else:
-    optimizer = RMSprop(lr = args.optimizer_lr)
+    if args.optimizer_lr is None:
+        optimizer = 'rmsprop'
+    else:
+        optimizer = RMSprop(lr=args.optimizer_lr)
 else:
-  assert False
+    assert False
 
 # inputs to the model are obesvation and advantage,
 # outputs are action probabilities and baseline
@@ -81,7 +77,7 @@ model = Model(input=[x, a], output=[y, b])
 model.summary()
 # baseline is optimized with MSE
 model.compile(optimizer='adam', loss=[policy_gradient_loss, mse],
-  loss_weights=[1, args.tau])
+              loss_weights=[1, args.tau])
 
 all_rewards = []
 total_reward = 0
@@ -95,11 +91,11 @@ for i_episode in xrange(args.episodes):
     episode_reward = 0
     for t in xrange(args.max_timesteps):
         if args.display:
-          env.render()
+            env.render()
 
         # create inputs for batch size 1
         x = np.array([observation])
-        a = np.zeros((1,1))
+        a = np.zeros((1, 1))
         # predict action probabilities (and baseline state value)
         y, b = model.predict([x, a], batch_size=1)
         y /= np.sum(y)  # ensure y-s sum up to 1
@@ -111,7 +107,7 @@ for i_episode in xrange(args.episodes):
         # record observation, action and baseline
         observations.append(observation)
         actions.append(action)
-        baselines.append(b[0,0])
+        baselines.append(b[0, 0])
 
         # make a step in environment
         observation, reward, done, info = env.step(action)
@@ -137,12 +133,12 @@ for i_episode in xrange(args.episodes):
     r = np.array(discounted_future_rewards)
     # if tau == 0, don't use baseline functionality
     if args.tau == 0:
-      # instead calculate baseline as average of discounted future rewards 
-      b = np.mean(all_rewards[-args.average_over:])
-      #b = float(total_reward) / (i_episode + 1)
+        # instead calculate baseline as average of discounted future rewards 
+        b = np.mean(all_rewards[-args.average_over:])
+        #b = float(total_reward) / (i_episode + 1)
     else:
-      # otherwise use baseline predictions
-      b = np.array(baselines)
+        # otherwise use baseline predictions
+        b = np.array(baselines)
     #print x.shape, y.shape, r.shape, b.shape
     #print "x:", x
     #print "y:", y
@@ -161,4 +157,4 @@ for i_episode in xrange(args.episodes):
 print "Average reward per episode {}".format(total_reward / args.episodes)
 
 if args.gym_record:
-  env.monitor.close()
+    env.monitor.close()
