@@ -62,12 +62,13 @@ else:
   W_constraint = None
 
 # optional regularizer
-if args.l2_reg:
-  W_regularizer = l2(args.l2_reg)
-elif args.l1_reg:
-  W_regularizer = l1(args.l1_reg)
-else:
-  W_regularizer = None
+def regularizer():
+  if args.l2_reg:
+    return l2(args.l2_reg)
+  elif args.l1_reg:
+    return l1(args.l1_reg)
+  else:
+    return None
 
 # helper functions to use with layers
 if num_actuators == 1:
@@ -126,17 +127,17 @@ def createLayers():
     h = x
   for i in xrange(args.layers):
     h = Dense(args.hidden_size, activation=args.activation, name='h'+str(i+1),
-        W_constraint=W_constraint, W_regularizer=W_regularizer)(h)
+        W_constraint=W_constraint, W_regularizer=regularizer())(h)
     if args.batch_norm and i != args.layers - 1:
       h = BatchNormalization()(h)
-  v = Dense(1, name='v', W_constraint=W_constraint, W_regularizer=W_regularizer)(h)
-  m = Dense(num_actuators, name='m', W_constraint=W_constraint, W_regularizer=W_regularizer)(h)
+  v = Dense(1, name='v', W_constraint=W_constraint, W_regularizer=regularizer())(h)
+  m = Dense(num_actuators, name='m', W_constraint=W_constraint, W_regularizer=regularizer())(h)
   l0 = Dense(num_actuators * (num_actuators + 1)/2, name='l0',
-        W_constraint=W_constraint, W_regularizer=W_regularizer)(h)
+        W_constraint=W_constraint, W_regularizer=regularizer())(h)
   l = Lambda(_L, output_shape=(num_actuators, num_actuators), name='l')(l0)
   p = Lambda(_P, output_shape=(num_actuators, num_actuators), name='p')(l)
-  a = merge([m, p, u], mode=_A, output_shape=(None, num_actuators,), name="a")
-  q = merge([v, a], mode=_Q, output_shape=(None, num_actuators,), name="q")
+  a = merge([m, p, u], mode=_A, output_shape=(num_actuators,), name="a")
+  q = merge([v, a], mode=_Q, output_shape=(num_actuators,), name="q")
   return x, u, m, v, q, p, a
 
 x, u, m, v, q, p, a = createLayers()
