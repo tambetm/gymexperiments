@@ -13,14 +13,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--hidden_size', type=int, default=200)
 parser.add_argument('--layers', type=int, default=2)
 parser.add_argument('--gamma', type=float, default=0.99)
-parser.add_argument('--tau', type=float, default=0)
+parser.add_argument('--tau', type=float, default=0.1)
 parser.add_argument('--episodes', type=int, default=200)
 parser.add_argument('--max_timesteps', type=int, default=200)
 parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
 parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
-parser.add_argument('--optimizer_lr', type=float, default=0.01)
-# parser.add_argument('--batch_size', type=int, default=32)
-# parser.add_argument('--repeat_train', type=int, default=1)
+parser.add_argument('--optimizer_lr', type=float)
+#parser.add_argument('--batch_size', type=int, default=32)
+#parser.add_argument('--repeat_train', type=int, default=1)
 parser.add_argument('--average_over', type=int, default=1000)
 parser.add_argument('--display', action='store_true', default=True)
 parser.add_argument('--no_display', dest='display', action='store_false')
@@ -43,19 +43,14 @@ for i in xrange(args.layers):
     h = Dense(args.hidden_size, activation=args.activation)(h)
 y = Dense(env.action_space.n, activation='softmax')(h)
 
-# additional branch to the network that calculates baseline (state-value)
+# baseline network
 h = Dense(args.hidden_size, activation=args.activation)(h)
-# fully-connected layer to produce baseline
 b = Dense(1)(h)
 
 # advantage is an additional input to the network
-# because advantage is a constant and we multiply loss with it,
-# it automatically propagates in the gradient formulas and does the right thing
-a = Input(shape=(1,))
-
-
+R = Input(shape=(1,))
 def policy_gradient_loss(l_sampled, l_predicted):
-    return a * K.mean(categorical_crossentropy(l_sampled, l_predicted), axis=-1, keepdims=True)
+    return K.mean(K.stop_gradient(R - b) * categorical_crossentropy(l_sampled, l_predicted)[..., np.newaxis], axis=-1)
 
 # create optimizer with optional learning rate parameter
 if args.optimizer == 'adam':
@@ -73,11 +68,10 @@ else:
 
 # inputs to the model are obesvation and advantage,
 # outputs are action probabilities and baseline
-model = Model(input=[x, a], output=[y, b])
+model = Model(input=[x, R], output=[y, b])
 model.summary()
 # baseline is optimized with MSE
-model.compile(optimizer='adam', loss=[policy_gradient_loss, mse],
-              loss_weights=[1, args.tau])
+model.compile(optimizer=optimizer, loss=[policy_gradient_loss, 'mse'], loss_weights=[1, args.tau])
 
 all_rewards = []
 total_reward = 0
@@ -85,7 +79,7 @@ for i_episode in xrange(args.episodes):
     observations = []
     actions = []
     rewards = []
-    baselines = []
+    #baselines = []
 
     observation = env.reset()
     episode_reward = 0
@@ -107,10 +101,10 @@ for i_episode in xrange(args.episodes):
         # record observation, action and baseline
         observations.append(observation)
         actions.append(action)
-        baselines.append(b[0, 0])
+        #baselines.append(b[0,0])
 
         # make a step in environment
-        observation, reward, done, info = env.step(action)
+        observation, reward, done, info = env.step(int(action))
         episode_reward += reward
         #print "reward:", reward
         rewards.append(reward)
@@ -131,26 +125,17 @@ for i_episode in xrange(args.episodes):
     x = np.array(observations)
     y = np_utils.to_categorical(actions, env.action_space.n)
     r = np.array(discounted_future_rewards)
-    # if tau == 0, don't use baseline functionality
-    if args.tau == 0:
-        # instead calculate baseline as average of discounted future rewards 
-        b = np.mean(all_rewards[-args.average_over:])
-        #b = float(total_reward) / (i_episode + 1)
-    else:
-        # otherwise use baseline predictions
-        b = np.array(baselines)
     #print x.shape, y.shape, r.shape, b.shape
     #print "x:", x
     #print "y:", y
     #print "r:", r
-    print "b:", b
+    #print "b:", b
     #print "a:", r - b
-    # train the model, using discounted future rewards - baseline as advantage,
-    # sampled actions as targets for actions and discounted future rewards as targets for baseline
-    # the hope is the baseline is tracking average discounted future reward for this observation (state value)
-    model.train_on_batch([x, r - b], [y, r])
-    #model.fit([x, r - b], [y, r], batch_size=args.batch_size, nb_epoch=args.repeat_train)
-
+    # train the model, using discounted_future_rewards - baseline as advantage,
+    # sampled actions as targets for actions and discounted_future_rewards as targets for baseline
+    # the hope is the baseline is tracking average discounted_future_reward for this observation (state value)
+    model.train_on_batch([x, r], [y, r])
+ 
     print "Episode {} finished after {} timesteps, episode reward {}".format(i_episode + 1, t + 1, episode_reward)
     total_reward += episode_reward
 
