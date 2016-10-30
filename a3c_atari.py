@@ -8,7 +8,7 @@ from queue import Empty
 import cPickle as pickle
 
 from keras.models import Model
-from keras.layers import Input, Dense, Masking, TimeDistributed
+from keras.layers import Input, Masking, TimeDistributed, AveragePooling2D, Convolution2D, Flatten, Dense
 from keras.objectives import categorical_crossentropy
 from keras.utils import np_utils
 import keras.backend as K
@@ -19,7 +19,13 @@ def create_model(env):
     x = Input(shape=(None,) + env.observation_space.shape, name="x")
     # apply masking so that shorter episodes in batch can be padded
     # padded inputs must contain all zeros
-    h = Masking()(x)
+    #h = Masking()(x)
+    h = x
+
+    h = TimeDistributed(AveragePooling2D((2, 2), dim_ordering='tf'), name="p1")(h)
+    h = TimeDistributed(Convolution2D(16, 8, 8, subsample=(4, 4), activation=args.activation, dim_ordering='tf'), name='c1')(h)
+    h = TimeDistributed(Convolution2D(32, 4, 4, subsample=(2, 2), activation=args.activation, dim_ordering='tf'), name='c2')(h)
+    h = TimeDistributed(Flatten())(h)
 
     # policy network
     for i in xrange(args.layers):
@@ -27,7 +33,7 @@ def create_model(env):
     y = TimeDistributed(Dense(env.action_space.n, activation='softmax'), name="y")(h)
 
     # baseline network
-    h = TimeDistributed(Dense(args.hidden_size, activation=args.activation), name="hb")(h)
+    #h = TimeDistributed(Dense(args.hidden_size, activation=args.activation), name="hb")(h)
     b = TimeDistributed(Dense(1), name="b")(h)
 
     # total reward is additional input
@@ -36,6 +42,7 @@ def create_model(env):
     # policy gradient loss
     def policy_gradient_loss(l_sampled, l_predicted):
         return K.mean(K.stop_gradient(R - b) * categorical_crossentropy(l_sampled, l_predicted)[..., np.newaxis], axis=-1)
+    #            - args.beta * K.mean(K.sum(K.log(l_predicted) * l_predicted, axis=-1), axis=-1)
 
     # inputs to the model are observation and total reward,
     # outputs are action probabilities and baseline
@@ -136,7 +143,7 @@ def trainer(model, fifos, shared_array):
                     # predict action probabilities (and baseline state value)
                     _, b = model.predict([x, R], batch_size=1)
                     #print "v:", b[0][0, 0]
-                    returns = discount(rewards, b[0, 0, 0])
+                    returns = discount(rewards, b[0][0, 0])
 
                 # add to batch
                 batch_observations.append(np.array(observations))
@@ -189,21 +196,22 @@ def trainer(model, fifos, shared_array):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # model
-    parser.add_argument('--hidden_size', type=int, default=200)
-    parser.add_argument('--layers', type=int, default=2)
-    parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
+    parser.add_argument('--hidden_size', type=int, default=256)
+    parser.add_argument('--layers', type=int, default=1)
+    parser.add_argument('--activation', choices=['tanh', 'relu'], default='relu')
     # optimization
     parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
     parser.add_argument('--optimizer_lr', type=float, default=0.001)
     parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--beta', type=float, default=0.01)
     parser.add_argument('--tau', type=float, default=0.1)
     # parallelization
     parser.add_argument('--num_runners', type=int, default=2)
     parser.add_argument('--queue_length', type=int, default=5)
     parser.add_argument('--queue_timeout', type=int, default=100)
     # how long
-    parser.add_argument('--max_episodes', type=int, default=200)
-    parser.add_argument('--max_timesteps', type=int, default=1000)
+    parser.add_argument('--max_episodes', type=int, default=1000)
+    parser.add_argument('--max_timesteps', type=int, default=100)
     # technical
     parser.add_argument('--display', action='store_true', default=False)
     parser.add_argument('--no_display', dest='display', action='store_false')
@@ -215,6 +223,8 @@ if __name__ == '__main__':
     env = gym.make(args.environment)
     assert isinstance(env.observation_space, Box)
     assert isinstance(env.action_space, Discrete)
+    print "Observation space:", env.observation_space
+    print "Action space:", env.action_space
     # create main model
     model = create_model(env)
     model.summary()

@@ -53,6 +53,7 @@ def runner(main_model, weightlock, fifo):
     # copy of model
     model = create_model(env)
 
+    done = True
     for episode in range(args.max_episodes):
         # copy weights from main network at the beginning of episode
         # the main network's weights are only read, never modified
@@ -65,7 +66,9 @@ def runner(main_model, weightlock, fifo):
         actions = []
         rewards = []
 
-        observation = env.reset()
+        # don't need this because of autoreset?
+        if done:
+            observation = env.reset()
         for t in xrange(args.max_timesteps):
             if args.display:
                 env.render()
@@ -95,13 +98,12 @@ def runner(main_model, weightlock, fifo):
 
         # send observations, actions and rewards
         # block if fifo is full
-        fifo.put((observations, actions, rewards))
+        fifo.put((observations, actions, rewards, done, observation))
 
 
-def discount(rewards):
+def discount(rewards, g=0):
     # calculate discounted future rewards for this episode
     returns = []
-    g = 0
     for r in reversed(rewards):
         g = r + g * args.gamma
         returns.insert(0, g)
@@ -123,9 +125,19 @@ def trainer(model, weightlock, fifos):
         for fifo in fifos:
             try:
                 # wait for new episode
-                observations, actions, rewards = fifo.get(timeout=args.queue_timeout)
+                observations, actions, rewards, done, last_obs = fifo.get(timeout=args.queue_timeout)
                 # calculate discounted returns
-                returns = discount(rewards)
+                if done:
+                    # if terminal state then start from 0
+                    returns = discount(rewards, 0)
+                else:
+                    # otherwise calculate the value of the last state
+                    x = np.array([[last_obs]])
+                    R = np.zeros((1, 1, 1))  # dummy return
+                    # predict action probabilities (and baseline state value)
+                    _, b = model.predict([x, R], batch_size=1)
+                    #print "v:", b[0][0, 0]
+                    returns = discount(rewards, b[0, 0, 0])
 
                 # add to batch
                 batch_observations.append(np.array(observations))
