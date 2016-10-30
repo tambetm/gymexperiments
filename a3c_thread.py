@@ -3,16 +3,16 @@ import gym
 from gym.spaces import Box, Discrete
 
 import threading
-from threading import Thread
+from threading import Thread, Lock
 from queue import Queue, Empty
 
 from keras.models import Model
 from keras.layers import Input, Dense, Masking, TimeDistributed
-from keras.optimizers import Adam, RMSprop
 from keras.objectives import categorical_crossentropy
 from keras.utils import np_utils
 import keras.backend as K
 import numpy as np
+
 
 def create_model(env):
     x = Input(shape=(None,) + env.observation_space.shape, name="x")
@@ -22,7 +22,7 @@ def create_model(env):
 
     # policy network
     for i in xrange(args.layers):
-      h = TimeDistributed(Dense(args.hidden_size, activation=args.activation), name="h%d" % (i + 1))(h)
+        h = TimeDistributed(Dense(args.hidden_size, activation=args.activation), name="h%d" % (i + 1))(h)
     y = TimeDistributed(Dense(env.action_space.n, activation='softmax'), name="y")(h)
 
     # baseline network
@@ -31,6 +31,7 @@ def create_model(env):
 
     # total reward is additional input
     R = Input(shape=(None, 1))
+
     # policy gradient loss
     def policy_gradient_loss(l_sampled, l_predicted):
         return K.mean(K.stop_gradient(R - b) * categorical_crossentropy(l_sampled, l_predicted)[..., np.newaxis], axis=-1)
@@ -45,7 +46,8 @@ def create_model(env):
 
     return model
 
-def runner(main_model, fifo):
+
+def runner(main_model, weightlock, fifo):
     # local environment for runner
     env = gym.make(args.environment)
     # copy of model
@@ -55,7 +57,8 @@ def runner(main_model, fifo):
         # copy weights from main network at the beginning of episode
         # the main network's weights are only read, never modified
         # but we create our own model instance, because Keras is not thread-safe
-        weights = main_model.get_weights()
+        with weightlock:
+            weights = main_model.get_weights()
         model.set_weights(weights)
 
         observations = []
@@ -65,11 +68,11 @@ def runner(main_model, fifo):
         observation = env.reset()
         for t in xrange(args.max_timesteps):
             if args.display:
-              env.render()
+                env.render()
 
             # create inputs for batch (and timestep) of size 1
             x = np.array([[observation]])
-            R = np.zeros((1,1,1)) # dummy return
+            R = np.zeros((1, 1, 1))  # dummy return
             # predict action probabilities (and baseline state value)
             y, b = model.predict([x, R], batch_size=1)
             #print "b:", b[0][0]
@@ -94,6 +97,7 @@ def runner(main_model, fifo):
         # block if fifo is full
         fifo.put((observations, actions, rewards))
 
+
 def discount(rewards):
     # calculate discounted future rewards for this episode
     returns = []
@@ -104,7 +108,8 @@ def discount(rewards):
     #print returns
     return returns
 
-def trainer(model, fifos):
+
+def trainer(model, weightlock, fifos):
     step = 0
     while threading.active_count() > 1:
         batch_observations = []
@@ -115,7 +120,7 @@ def trainer(model, fifos):
         maxlen = 0
 
         # loop over fifos from all runners
-        for fifo in fifos:            
+        for fifo in fifos:
             try:
                 # wait for new episode
                 observations, actions, rewards = fifo.get(timeout=args.queue_timeout)
@@ -161,12 +166,12 @@ def trainer(model, fifos):
             #print "y:", y
             #print "R:", R
 
-            # train the model
-            total_loss, policy_loss, baseline_loss = model.train_on_batch([x, R], [y, R])
+            # train the model, prevent reading weights while doing this
+            with weightlock:
+                total_loss, policy_loss, baseline_loss = model.train_on_batch([x, R], [y, R])
             #print "total_loss:", total_loss
             #print "policy_loss:", policy_loss
             #print "baseline_loss:", baseline_loss
-            #model.save_weights('temp.hdf5')
 
             step += 1
 
@@ -202,6 +207,7 @@ if __name__ == '__main__':
     # create main model
     model = create_model(env)
     model.summary()
+    weightlock = Lock()
     env.close()
 
     # create fifos and threads for all runners
@@ -209,7 +215,7 @@ if __name__ == '__main__':
     for i in range(args.num_runners):
         fifo = Queue(args.queue_length)
         fifos.append(fifo)
-        thread = Thread(target=runner, args=(model, fifo))
+        thread = Thread(target=runner, args=(model, weightlock, fifo))
         thread.start()
 
-    trainer(model, fifos)
+    trainer(model, weightlock, fifos)
