@@ -16,10 +16,7 @@ import numpy as np
 
 
 def create_model(env, args):
-    x = Input(shape=(None,) + env.observation_space.shape, name="x")
-    # apply masking so that shorter episodes in batch can be padded
-    # padded inputs must contain all zeros
-    h = Masking()(x)
+    h = x = Input(shape=(None,) + env.observation_space.shape, name="x")
 
     # policy network
     for i in xrange(args.layers):
@@ -58,13 +55,17 @@ def predict(model, observation):
     return y[0, 0], b[0, 0, 0]
 
 
-def discount(rewards, g, gamma):
-    # calculate discounted future rewards for this episode
+def discount(rewards, terminals, v, gamma):
+    # calculate discounted future rewards for this trajectory
     returns = []
-    for r in reversed(rewards):
+    # start with the predicted value of the last state
+    g = v
+    for r, t in reversed(zip(rewards, terminals)):
+        # if it was terminal state then restart from 0
+        if t:
+            g = 0
         g = r + g * gamma
         returns.insert(0, g)
-    #print returns
     return returns
 
 
@@ -74,9 +75,15 @@ def runner(shared_buffer, fifo, args):
     # copy of model
     model = create_model(env, args)
 
-    done = True
-    for episode in range(args.max_episodes):
-        # copy weights from main network at the beginning of episode
+    # record episode lengths and rewards for statistics
+    episode_rewards = []
+    episode_lengths = []
+    episode_reward = 0
+    episode_length = 0
+
+    observation = env.reset()
+    for i in range(args.num_iterations):
+        # copy weights from main network at the beginning of iteration
         # the main network's weights are only read, never modified
         # but we create our own model instance, because Keras is not thread-safe
         model.set_weights(pickle.loads(shared_buffer.raw))
@@ -84,18 +91,16 @@ def runner(shared_buffer, fifo, args):
         observations = []
         actions = []
         rewards = []
+        terminals = []
 
-        # don't need this because of autoreset?
-        if done:
-            observation = env.reset()
-        for t in xrange(args.max_timesteps):
+        for t in xrange(args.iteration_steps):
             if args.display:
                 env.render()
 
             # predict action probabilities (and baseline state value)
             p, b = predict(model, observation)
-            #print "b:", b[0][0]
-            #print "p:", p[0][0]
+            #print "b:", b
+            #print "p:", p
 
             # sample action using those probabilities
             p /= np.sum(p)  # ensure p-s sum up to 1
@@ -104,93 +109,94 @@ def runner(shared_buffer, fifo, args):
 
             # step environment and log data
             observations.append(observation)
-            observation, reward, done, info = env.step(int(action))
+            observation, reward, terminal, _ = env.step(int(action))
             actions.append(action)
             rewards.append(reward)
+            terminals.append(terminal)
 
-            # stop if terminal state
-            if done:
-                break
+            episode_reward += reward
+            episode_length += 1
+
+            # reset if terminal state
+            if terminal:
+                episode_rewards.append(episode_reward)
+                episode_lengths.append(episode_length)
+                episode_reward = 0
+                episode_length = 0
+                observation = env.reset()
 
         # calculate discounted returns
-        if done:
-            # if terminal state then start from 0
-            returns = discount(rewards, 0, args.gamma)
+        if terminal:
+            # if the last was terminal state then start from 0
+            returns = discount(rewards, terminals, 0, args.gamma)
         else:
             # otherwise calculate the value of the last state
             _, v = predict(model, observation)
             #print "v:", v
-            returns = discount(rewards, v, args.gamma)
+            returns = discount(rewards, terminals, v, args.gamma)
 
         # send observations, actions, rewards and returns
         # block if fifo is full
-        fifo.put((observations, actions, rewards, returns))
+        fifo.put((
+            np.array(observations),
+            np_utils.to_categorical(actions, env.action_space.n),
+            np.array(returns),
+            episode_rewards,
+            episode_lengths
+        ))
+        episode_rewards = []
+        episode_lengths = []
 
 
 def trainer(model, fifos, shared_buffer, args):
-    step = 0
+    iteration = 0
+    episode_rewards = []
+    episode_lengths = []
     while len(multiprocessing.active_children()) > 0:
         batch_observations = []
         batch_actions = []
         batch_returns = []
-        episode_rewards = []
-        episode_lengths = []
-        maxlen = 0
 
         # loop over fifos from all runners
         for fifo in fifos:
             try:
-                # wait for new episode
-                observations, actions, rewards, returns = fifo.get(timeout=args.queue_timeout)
+                # wait for new trajectory
+                observations, actions, returns, rewards, lengths = fifo.get(timeout=args.queue_timeout)
 
                 # add to batch
-                batch_observations.append(np.array(observations))
-                batch_actions.append(np_utils.to_categorical(actions, env.action_space.n))
-                batch_returns.append(np.array(returns))
-
-                # log max episode length
-                if len(observations) > maxlen:
-                    maxlen = len(observations)
+                batch_observations.append(observations)
+                batch_actions.append(actions)
+                batch_returns.append(returns)
 
                 # log statistics
-                episode_rewards.append(sum(rewards))
-                episode_lengths.append(len(rewards))
+                episode_rewards += rewards
+                episode_lengths += lengths
 
             except Empty:
                 # just ignore empty fifos, batch will be smaller
                 pass
 
-        # if any of the runners produced episodes
-        if maxlen > 0:
-            print "Step %d: batch size %d, mean episode reward %.2f, mean episode length %.2f." % (step, len(episode_rewards), np.mean(episode_rewards), np.mean(episode_lengths))
-
-            # pad all episodes to be of the same length
-            for a in batch_observations:
-                a.resize((maxlen,) + a.shape[1:], refcheck=False)
-            for a in batch_actions:
-                a.resize((maxlen,) + a.shape[1:], refcheck=False)
-            for a in batch_returns:
-                a.resize((maxlen,) + a.shape[1:], refcheck=False)
-
+        # if any of the runners produced trajectories
+        if len(batch_observations) > 0:
             # form training data from observations, actions and returns
             x = np.array(batch_observations)
             p = np.array(batch_actions)
             g = np.array(batch_returns)
             g = g[..., np.newaxis]
-            #print x.shape, y.shape, r.shape, b.shape
-            #print "x:", x
-            #print "y:", y
-            #print "g:", g
 
             # train the model
             total_loss, policy_loss, baseline_loss = model.train_on_batch([x, g], [p, g])
-            #print "total_loss:", total_loss
-            #print "policy_loss:", policy_loss
-            #print "baseline_loss:", baseline_loss
+
             # share model parameters
             shared_buffer.raw = pickle.dumps(model.get_weights(), pickle.HIGHEST_PROTOCOL)
 
-            step += 1
+            iteration += 1
+
+            if iteration % args.stats_interval == 0:
+                print "Iter %d: episodes %d, mean episode reward %.2f, mean episode length %.2f." % (iteration, len(episode_rewards), np.mean(episode_rewards), np.mean(episode_lengths))
+                episode_rewards = []
+                episode_lengths = []
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -208,8 +214,9 @@ if __name__ == '__main__':
     parser.add_argument('--queue_length', type=int, default=2)
     parser.add_argument('--queue_timeout', type=int, default=10)
     # how long
-    parser.add_argument('--max_episodes', type=int, default=200)
-    parser.add_argument('--max_timesteps', type=int, default=200)
+    parser.add_argument('--num_iterations', type=int, default=200)
+    parser.add_argument('--iteration_steps', type=int, default=200)
+    parser.add_argument('--stats_interval', type=int, default=10)
     # technical
     parser.add_argument('--display', action='store_true', default=False)
     parser.add_argument('--no_display', dest='display', action='store_false')
