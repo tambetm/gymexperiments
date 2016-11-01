@@ -1,14 +1,15 @@
 import argparse
+import os
 import gym
 from gym.spaces import Box, Discrete
 
 import multiprocessing
 from multiprocessing import Process, Queue, Array
 from queue import Empty
-import cPickle as pickle
+import pickle
 
 from keras.models import Model
-from keras.layers import Input, Masking, TimeDistributed, Dense
+from keras.layers import Input, TimeDistributed, Dense
 from keras.objectives import categorical_crossentropy
 from keras.utils import np_utils
 import keras.backend as K
@@ -19,7 +20,7 @@ def create_model(env, args):
     h = x = Input(shape=(None,) + env.observation_space.shape, name="x")
 
     # policy network
-    for i in xrange(args.layers):
+    for i in range(args.layers):
         h = TimeDistributed(Dense(args.hidden_size, activation=args.activation), name="h%d" % (i + 1))(h)
     p = TimeDistributed(Dense(env.action_space.n, activation='softmax'), name="p")(h)
 
@@ -32,7 +33,7 @@ def create_model(env, args):
 
     # policy gradient loss
     def policy_gradient_loss(l_sampled, l_predicted):
-        return K.mean(K.stop_gradient(g - b) * categorical_crossentropy(l_sampled, l_predicted)[..., np.newaxis], axis=-1)
+        return K.mean(K.stop_gradient(g - b)[:, :, 0] * categorical_crossentropy(l_sampled, l_predicted), axis=1)
 
     # inputs to the model are observation and total reward,
     # outputs are action probabilities and baseline
@@ -50,9 +51,9 @@ def predict(model, observation):
     x = np.array([[observation]])
     g = np.zeros((1, 1, 1))  # dummy return
     # predict action probabilities (and baseline state value)
-    y, b = model.predict([x, g], batch_size=1)
+    p, b = model.predict_on_batch([x, g])
     # return action probabilities and baseline
-    return y[0, 0], b[0, 0, 0]
+    return p[0, 0], b[0, 0, 0]
 
 
 def discount(rewards, terminals, v, gamma):
@@ -60,7 +61,7 @@ def discount(rewards, terminals, v, gamma):
     returns = []
     # start with the predicted value of the last state
     g = v
-    for r, t in reversed(zip(rewards, terminals)):
+    for r, t in zip(reversed(rewards), reversed(terminals)):
         # if it was terminal state then restart from 0
         if t:
             g = 0
@@ -93,19 +94,20 @@ def runner(shared_buffer, fifo, args):
         rewards = []
         terminals = []
 
-        for t in xrange(args.iteration_steps):
+        for t in range(args.iteration_steps):
             if args.display:
                 env.render()
 
             # predict action probabilities (and baseline state value)
             p, b = predict(model, observation)
-            #print "b:", b
-            #print "p:", p
+            #print("b:", b)
+            #print("p:", p)
 
             # sample action using those probabilities
             p /= np.sum(p)  # ensure p-s sum up to 1
             action = np.random.choice(env.action_space.n, p=p)
-            #print "action:", action
+            #action = np.random.multinomial(1, p).argmax()
+            #print("action:", action)
 
             # step environment and log data
             observations.append(observation)
@@ -193,9 +195,44 @@ def trainer(model, fifos, shared_buffer, args):
             iteration += 1
 
             if iteration % args.stats_interval == 0:
-                print "Iter %d: episodes %d, mean episode reward %.2f, mean episode length %.2f." % (iteration, len(episode_rewards), np.mean(episode_rewards), np.mean(episode_lengths))
+                print("Iter %d: episodes %d, mean episode reward %.2f, mean episode length %.2f." % (iteration, len(episode_rewards), np.mean(episode_rewards), np.mean(episode_lengths)))
                 episode_rewards = []
                 episode_lengths = []
+
+
+def run(args):
+    # create dummy environment to be able to create model
+    env = gym.make(args.environment)
+    assert isinstance(env.observation_space, Box)
+    assert isinstance(env.action_space, Discrete)
+    print("Observation space:", env.observation_space)
+    print("Action space:", env.action_space)
+
+    # create main model
+    model = create_model(env, args)
+    model.summary()
+    env.close()
+
+    # force runner processes to use cpu
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    # for better compatibility with Theano and Tensorflow
+    multiprocessing.set_start_method('spawn')
+
+    # create shared buffer for sharing weights
+    blob = pickle.dumps(model.get_weights(), pickle.HIGHEST_PROTOCOL)
+    shared_buffer = Array('c', len(blob))
+    shared_buffer.raw = blob
+
+    # create fifos and threads for all runners
+    fifos = []
+    for i in range(args.num_runners):
+        fifo = Queue(args.queue_length)
+        fifos.append(fifo)
+        process = Process(target=runner, args=(shared_buffer, fifo, args))
+        process.start()
+
+    # start trainer in main thread
+    trainer(model, fifos, shared_buffer, args)
 
 
 if __name__ == '__main__':
@@ -211,8 +248,8 @@ if __name__ == '__main__':
     parser.add_argument('--tau', type=float, default=0.1)
     # parallelization
     parser.add_argument('--num_runners', type=int, default=2)
-    parser.add_argument('--queue_length', type=int, default=2)
-    parser.add_argument('--queue_timeout', type=int, default=10)
+    parser.add_argument('--queue_length', type=int, default=5)
+    parser.add_argument('--queue_timeout', type=int, default=1)
     # how long
     parser.add_argument('--num_iterations', type=int, default=200)
     parser.add_argument('--iteration_steps', type=int, default=200)
@@ -224,27 +261,4 @@ if __name__ == '__main__':
     parser.add_argument('environment')
     args = parser.parse_args()
 
-    # create dummy environment to be able to create model
-    env = gym.make(args.environment)
-    assert isinstance(env.observation_space, Box)
-    assert isinstance(env.action_space, Discrete)
-
-    # create main model
-    model = create_model(env, args)
-    model.summary()
-
-    # create shared buffer for sharing weights
-    blob = pickle.dumps(model.get_weights(), pickle.HIGHEST_PROTOCOL)
-    shared_buffer = Array('c', len(blob))
-    shared_buffer.raw = blob
-    env.close()
-
-    # create fifos and threads for all runners
-    fifos = []
-    for i in range(args.num_runners):
-        fifo = Queue(args.queue_length)
-        fifos.append(fifo)
-        process = Process(target=runner, args=(shared_buffer, fifo, args))
-        process.start()
-
-    trainer(model, fifos, shared_buffer, args)
+    run(args)
