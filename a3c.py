@@ -28,19 +28,20 @@ def create_model(env, args):
     h = TimeDistributed(Dense(args.hidden_size, activation=args.activation), name="hb")(h)
     b = TimeDistributed(Dense(1), name="b")(h)
 
-    # total reward is additional input
-    g = Input(shape=(None, 1))
+    # advantage is additional input
+    A = Input(shape=(None,))
 
-    # policy gradient loss
+    # policy gradient loss and entropy bonus
     def policy_gradient_loss(l_sampled, l_predicted):
-        return K.mean(K.stop_gradient(g - b)[:, :, 0] * categorical_crossentropy(l_sampled, l_predicted), axis=1)
+        return K.mean(A * categorical_crossentropy(l_sampled, l_predicted), axis=1) \
+            - args.beta * K.mean(categorical_crossentropy(l_predicted, l_predicted), axis=1)
 
     # inputs to the model are observation and total reward,
     # outputs are action probabilities and baseline
-    model = Model(input=[x, g], output=[p, b])
+    model = Model(input=[x, A], output=[p, b])
 
     # baseline is optimized with MSE
-    model.compile(optimizer=args.optimizer, loss=[policy_gradient_loss, 'mse'], loss_weights=[1, args.tau])
+    model.compile(optimizer=args.optimizer, loss=[policy_gradient_loss, 'mse'])
     model.optimizer.lr = args.optimizer_lr
 
     return model
@@ -49,9 +50,9 @@ def create_model(env, args):
 def predict(model, observation):
     # create inputs for batch (and timestep) of size 1
     x = np.array([[observation]])
-    g = np.zeros((1, 1, 1))  # dummy return
+    A = np.zeros((1, 1))  # dummy advantage
     # predict action probabilities (and baseline state value)
-    p, b = model.predict_on_batch([x, g])
+    p, b = model.predict_on_batch([x, A])
     # return action probabilities and baseline
     return p[0, 0], b[0, 0, 0]
 
@@ -60,13 +61,13 @@ def discount(rewards, terminals, v, gamma):
     # calculate discounted future rewards for this trajectory
     returns = []
     # start with the predicted value of the last state
-    g = v
+    R = v
     for r, t in zip(reversed(rewards), reversed(terminals)):
         # if it was terminal state then restart from 0
         if t:
-            g = 0
-        g = r + g * gamma
-        returns.insert(0, g)
+            R = 0
+        R = r + R * gamma
+        returns.insert(0, R)
     return returns
 
 
@@ -93,6 +94,7 @@ def runner(shared_buffer, fifo, args):
         actions = []
         rewards = []
         terminals = []
+        baselines = []
 
         for t in range(args.iteration_steps):
             if args.display:
@@ -111,8 +113,9 @@ def runner(shared_buffer, fifo, args):
 
             # step environment and log data
             observations.append(observation)
-            observation, reward, terminal, _ = env.step(int(action))
             actions.append(action)
+            baselines.append(b)
+            observation, reward, terminal, _ = env.step(int(action))
             rewards.append(reward)
             terminals.append(terminal)
 
@@ -137,12 +140,16 @@ def runner(shared_buffer, fifo, args):
             #print "v:", v
             returns = discount(rewards, terminals, v, args.gamma)
 
+        # calculate advantages
+        advantages = np.array(returns) - np.array(baselines)
+
         # send observations, actions, rewards and returns
         # block if fifo is full
         fifo.put((
             np.array(observations),
             np_utils.to_categorical(actions, env.action_space.n),
             np.array(returns),
+            advantages,
             episode_rewards,
             episode_lengths
         ))
@@ -158,17 +165,19 @@ def trainer(model, fifos, shared_buffer, args):
         batch_observations = []
         batch_actions = []
         batch_returns = []
+        batch_advantages = []
 
         # loop over fifos from all runners
         for fifo in fifos:
             try:
                 # wait for new trajectory
-                observations, actions, returns, rewards, lengths = fifo.get(timeout=args.queue_timeout)
+                observations, actions, returns, advantages, rewards, lengths = fifo.get(timeout=args.queue_timeout)
 
                 # add to batch
                 batch_observations.append(observations)
                 batch_actions.append(actions)
                 batch_returns.append(returns)
+                batch_advantages.append(advantages)
 
                 # log statistics
                 episode_rewards += rewards
@@ -183,11 +192,12 @@ def trainer(model, fifos, shared_buffer, args):
             # form training data from observations, actions and returns
             x = np.array(batch_observations)
             p = np.array(batch_actions)
-            g = np.array(batch_returns)
-            g = g[..., np.newaxis]
+            R = np.array(batch_returns)
+            A = np.array(batch_advantages)
+            R = R[..., np.newaxis]
 
             # train the model
-            total_loss, policy_loss, baseline_loss = model.train_on_batch([x, g], [p, g])
+            total_loss, policy_loss, baseline_loss = model.train_on_batch([x, A], [p, R])
 
             # share model parameters
             shared_buffer.raw = pickle.dumps(model.get_weights(), pickle.HIGHEST_PROTOCOL)
@@ -245,10 +255,10 @@ if __name__ == '__main__':
     parser.add_argument('--optimizer', choices=['adam', 'rmsprop'], default='adam')
     parser.add_argument('--optimizer_lr', type=float, default=0.001)
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--tau', type=float, default=0.1)
+    parser.add_argument('--beta', type=float, default=0)
     # parallelization
     parser.add_argument('--num_runners', type=int, default=2)
-    parser.add_argument('--queue_length', type=int, default=5)
+    parser.add_argument('--queue_length', type=int, default=1)
     parser.add_argument('--queue_timeout', type=int, default=1)
     # how long
     parser.add_argument('--num_iterations', type=int, default=200)
