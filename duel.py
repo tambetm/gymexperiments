@@ -17,7 +17,7 @@ parser.add_argument('--no_batch_norm', action="store_false", dest='batch_norm')
 parser.add_argument('--replay_size', type=int, default=100000)
 parser.add_argument('--train_repeat', type=int, default=10)
 parser.add_argument('--gamma', type=float, default=0.99)
-parser.add_argument('--tau', type=float, default=0.001)
+parser.add_argument('--tau', type=float, default=0.1)
 parser.add_argument('--episodes', type=int, default=200)
 parser.add_argument('--max_timesteps', type=int, default=200)
 parser.add_argument('--activation', choices=['tanh', 'relu'], default='tanh')
@@ -84,7 +84,7 @@ for i_episode in xrange(args.episodes):
             action = env.action_space.sample()
         else:
             s = np.array([observation])
-            q = model.predict(s, batch_size=1)
+            q = model.predict_on_batch(s)
             #print "q:", q
             action = np.argmax(q[0])
         #print "action:", action
@@ -98,8 +98,8 @@ for i_episode in xrange(args.episodes):
         for k in xrange(args.train_repeat):
             prestates, actions, rewards, poststates, terminals = mem.sample(args.batch_size)
 
-            qpre = model.predict(prestates)
-            qpost = model.predict(poststates)
+            qpre = model.predict_on_batch(prestates)
+            qpost = target_model.predict_on_batch(poststates)
             for i in xrange(qpre.shape[0]):
                 if terminals[i]:
                     qpre[i, actions[i]] = rewards[i]
