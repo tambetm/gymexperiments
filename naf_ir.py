@@ -2,7 +2,7 @@ import argparse
 import gym
 from gym.spaces import Box, Discrete
 from keras.models import Model
-from keras.layers import Input, Dense, Lambda, Reshape, merge
+from keras.layers import Input, Dense, Lambda, Reshape, merge, add
 from keras.layers.normalization import BatchNormalization
 from keras.regularizers import l2, l1
 from keras.constraints import maxnorm, unitnorm
@@ -25,7 +25,7 @@ parser.add_argument('--unit_norm', action='store_true', default=False)
 parser.add_argument('--l2_reg', type=float)
 parser.add_argument('--l1_reg', type=float)
 parser.add_argument('--replay_size', type=int, default=100000)
-parser.add_argument('--train_repeat', type=int, default=5)
+parser.add_argument('--train_repeat', type=int, default=5)    #why?
 parser.add_argument('--gamma', type=float, default=0.99)
 parser.add_argument('--tau', type=float, default=0.001)
 parser.add_argument('--episodes', type=int, default=200)
@@ -67,11 +67,11 @@ else:
 
 # optional regularizer
 if args.l2_reg:
-  W_regularizer = l2(args.l2_reg)
+  kernel_regularizer = l2(args.l2_reg)
 elif args.l1_reg:
-  W_regularizer = l1(args.l1_reg)
+  kernel_regularizer = l1(args.l1_reg)
 else:
-  W_regularizer = None
+  kernel_regularizer = None
 
 # helper functions to use with layers
 if num_actuators == 1:
@@ -130,17 +130,21 @@ def createLayers():
     h = x
   for i in xrange(args.layers):
     h = Dense(args.hidden_size, activation=args.activation, name='h'+str(i+1),
-        W_constraint=W_constraint, W_regularizer=W_regularizer)(h)
+        kernel_constraint=W_constraint, kernel_regularizer=kernel_regularizer)(h)
     if args.batch_norm and i != args.layers - 1:
       h = BatchNormalization()(h)
-  v = Dense(1, name='v', W_constraint=W_constraint, W_regularizer=W_regularizer)(h)
-  m = Dense(num_actuators, name='m', W_constraint=W_constraint, W_regularizer=W_regularizer)(h)
+  v = Dense(1, name='v', kernel_constraint=W_constraint, \
+	kernel_regularizer=kernel_regularizer)(h)
+  m = Dense(num_actuators, name='m', kernel_constraint=W_constraint, \
+	kernel_regularizer=kernel_regularizer)(h)
   l0 = Dense(num_actuators * (num_actuators + 1)/2, name='l0',
-        W_constraint=W_constraint, W_regularizer=W_regularizer)(h)
+             kernel_constraint=W_constraint, kernel_regularizer=kernel_regularizer)(h)
   l = Lambda(_L, output_shape=(num_actuators, num_actuators), name='l')(l0)
   p = Lambda(_P, output_shape=(num_actuators, num_actuators), name='p')(l)
-  a = merge([m, p, u], mode=_A, output_shape=(None, num_actuators,), name="a")
-  q = merge([v, a], mode=_Q, output_shape=(None, num_actuators,), name="q")
+  #a = merge([m, p, u], mode=_A, output_shape=(None, num_actuators,), name="a")
+  a = merge([m, p, u], mode=_A, output_shape=(num_actuators,), name="a")
+  #q = merge([v, a], mode=_Q, output_shape=(None, num_actuators,), name="q")
+  q = add([v, a], name="q")
   return x, u, m, v, q, p, a
 
 x, u, m, v, q, p, a = createLayers()
@@ -159,7 +163,7 @@ fQ = K.function([K.learning_phase(), x, u], q)
 Q = lambda x, u: fQ([0, x, u])
 
 # main model
-model = Model(input=[x,u], output=q)
+model = Model(inputs=[x, u], outputs=q)
 model.summary()
 
 if args.optimizer == 'adam':
@@ -178,7 +182,7 @@ fV = K.function([K.learning_phase(), x], v)
 V = lambda x: fV([0, x])
 
 # target model is initialized from main model
-target_model = Model(input=[x,u], output=q)
+target_model = Model(inputs=[x, u], outputs=q)
 target_model.set_weights(model.get_weights())
 
 # replay memory
