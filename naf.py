@@ -47,7 +47,7 @@ assert isinstance(env.observation_space, Box), "observation space must be contin
 assert isinstance(env.action_space, Box), "action space must be continuous"
 assert len(env.action_space.shape) == 1
 num_actuators = env.action_space.shape[0]
-print "num_actuators:", num_actuators
+print("num_actuators:", num_actuators)
 
 # start monitor for OpenAI Gym
 if args.gym_record:
@@ -55,11 +55,11 @@ if args.gym_record:
 
 # optional norm constraint
 if args.max_norm:
-  W_constraint = maxnorm(args.max_norm)
+  kernel_constraint = maxnorm(args.max_norm)
 elif args.unit_norm:
-  W_constraint = unitnorm()
+  kernel_constraint = unitnorm()
 else:
-  W_constraint = None
+  kernel_constraint = None
 
 # optional regularizer
 def regularizer():
@@ -97,8 +97,8 @@ else:
     diag_idx = T.tile(T.arange(num_actuators), batch_size)
     b = T.set_subtensor(a[batch_idx, diag_idx, diag_idx], T.flatten(T.exp(x[:, :num_actuators])))
     # set lower triangle
-    cols = np.concatenate([np.array(range(i), dtype=np.uint) for i in xrange(num_actuators)])
-    rows = np.concatenate([np.array([i]*i, dtype=np.uint) for i in xrange(num_actuators)])
+    cols = np.concatenate([np.array(range(i), dtype=np.uint) for i in range(num_actuators)])
+    rows = np.concatenate([np.array([i]*i, dtype=np.uint) for i in range(num_actuators)])
     cols_idx = T.tile(T.as_tensor_variable(cols), batch_size)
     rows_idx = T.tile(T.as_tensor_variable(rows), batch_size)
     batch_idx = T.extra_ops.repeat(T.arange(batch_size), len(cols))
@@ -125,19 +125,19 @@ def createLayers():
     h = BatchNormalization()(x)
   else:
     h = x
-  for i in xrange(args.layers):
+  for i in range(args.layers):
     h = Dense(args.hidden_size, activation=args.activation, name='h'+str(i+1),
-        W_constraint=W_constraint, W_regularizer=regularizer())(h)
+        kernel_constraint=kernel_constraint, kernel_regularizer=regularizer())(h)
     if args.batch_norm and i != args.layers - 1:
       h = BatchNormalization()(h)
-  v = Dense(1, name='v', W_constraint=W_constraint, W_regularizer=regularizer())(h)
-  m = Dense(num_actuators, name='m', W_constraint=W_constraint, W_regularizer=regularizer())(h)
-  l0 = Dense(num_actuators * (num_actuators + 1)/2, name='l0',
-        W_constraint=W_constraint, W_regularizer=regularizer())(h)
+  v = Dense(1, name='v', kernel_constraint=kernel_constraint, kernel_regularizer=regularizer())(h)
+  m = Dense(num_actuators, name='m', kernel_constraint=kernel_constraint, kernel_regularizer=regularizer())(h)
+  l0 = Dense(num_actuators * (num_actuators + 1) // 2, name='l0',
+        kernel_constraint=kernel_constraint, kernel_regularizer=regularizer())(h)
   l = Lambda(_L, output_shape=(num_actuators, num_actuators), name='l')(l0)
   p = Lambda(_P, output_shape=(num_actuators, num_actuators), name='p')(l)
-  a = merge([m, p, u], mode=_A, output_shape=(num_actuators,), name="a")
-  q = merge([v, a], mode=_Q, output_shape=(num_actuators,), name="q")
+  a = Lambda(_A, output_shape=(num_actuators,), name="a")([m, p, u])
+  q = Lambda(_Q, output_shape=(num_actuators,), name="q")([v, a])
   return x, u, m, v, q, p, a
 
 x, u, m, v, q, p, a = createLayers()
@@ -156,7 +156,7 @@ fQ = K.function([K.learning_phase(), x, u], q)
 Q = lambda x, u: fQ([0, x, u])
 
 # main model
-model = Model(input=[x,u], output=q)
+model = Model(inputs=[x,u], outputs=q)
 model.summary()
 
 if args.optimizer == 'adam':
@@ -175,7 +175,7 @@ fV = K.function([K.learning_phase(), x], v)
 V = lambda x: fV([0, x])
 
 # target model is initialized from main model
-target_model = Model(input=[x,u], output=q)
+target_model = Model(inputs=[x,u], outputs=q)
 target_model.set_weights(model.get_weights())
 
 # replay memory
@@ -183,11 +183,11 @@ R = Buffer(args.replay_size, env.observation_space.shape, env.action_space.shape
 
 # the main learning loop
 total_reward = 0
-for i_episode in xrange(args.episodes):
+for i_episode in range(args.episodes):
     observation = env.reset()
     #print "initial state:", observation
     episode_reward = 0
-    for t in xrange(args.max_timesteps):
+    for t in range(args.max_timesteps):
         if args.display:
           env.render()
 
@@ -229,7 +229,7 @@ for i_episode in xrange(args.episodes):
 
         loss = 0
         # perform train_repeat Q-updates
-        for k in xrange(args.train_repeat):
+        for k in range(args.train_repeat):
           preobs, actions, rewards, postobs, terminals = R.sample(args.batch_size)
 
           # Q-update
@@ -240,7 +240,7 @@ for i_episode in xrange(args.episodes):
           # copy weights to target model, averaged by tau
           weights = model.get_weights()
           target_weights = target_model.get_weights()
-          for i in xrange(len(weights)):
+          for i in range(len(weights)):
             target_weights[i] = args.tau * weights[i] + (1 - args.tau) * target_weights[i]
           target_model.set_weights(target_weights)
         #print "average loss:", loss/k
@@ -248,10 +248,10 @@ for i_episode in xrange(args.episodes):
         if done:
             break
 
-    print "Episode {} finished after {} timesteps, reward {}".format(i_episode + 1, t + 1, episode_reward)
+    print("Episode {} finished after {} timesteps, reward {}".format(i_episode + 1, t + 1, episode_reward))
     total_reward += episode_reward
 
-print "Average reward per episode {}".format(total_reward / args.episodes)
+print("Average reward per episode {}".format(total_reward / args.episodes))
 
 if args.gym_record:
   env.monitor.close()

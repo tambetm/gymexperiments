@@ -32,7 +32,7 @@ if args.gym_record:
 
 # policy network
 h = x = Input(shape=env.observation_space.shape)
-for i in xrange(args.layers):
+for i in range(args.layers):
     h = Dense(args.hidden_size, activation=args.activation)(h)
 p = Dense(env.action_space.n, activation='softmax')(h)
 
@@ -49,13 +49,13 @@ def policy_gradient_loss(l_sampled, l_predicted):
 
 # inputs to the model are obesvation and advantage,
 # outputs are action probabilities and baseline
-model = Model(input=[x, A], output=[p, b])
+model = Model(inputs=[x, A], outputs=[p, b])
 model.summary()
 # baseline is optimized with MSE
 model.compile(optimizer='adam', loss=[policy_gradient_loss, 'mse'], loss_weights=[1, args.tau])
 
 total_reward = 0
-for i_episode in xrange(args.episodes):
+for i_episode in range(args.episodes):
     observations = []
     actions = []
     rewards = []
@@ -63,7 +63,7 @@ for i_episode in xrange(args.episodes):
 
     observation = env.reset()
     episode_reward = 0
-    for t in xrange(args.max_timesteps):
+    for t in range(args.max_timesteps):
         if args.display:
             env.render()
 
@@ -109,10 +109,10 @@ for i_episode in xrange(args.episodes):
     # the hope is the baseline is tracking average discounted_future_reward for this observation (state value)
     model.train_on_batch([x, A], [y, R])
 
-    print "Episode {} finished after {} timesteps, episode reward {}".format(i_episode + 1, t + 1, episode_reward)
+    print("Episode {} finished after {} timesteps, episode reward {}".format(i_episode + 1, t + 1, episode_reward))
     total_reward += episode_reward
 
-print "Average reward per episode {}".format(total_reward / args.episodes)
+print("Average reward per episode {}".format(total_reward / args.episodes))
 
 if args.gym_record:
     env.monitor.close()
