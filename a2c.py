@@ -223,8 +223,6 @@ def run(args):
     model.summary()
     env.close()
 
-    # force runner processes to use cpu
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
     # for better compatibility with Theano and Tensorflow
     multiprocessing.set_start_method('spawn')
 
@@ -232,6 +230,9 @@ def run(args):
     blob = pickle.dumps(model.get_weights(), pickle.HIGHEST_PROTOCOL)
     shared_buffer = Array('c', len(blob))
     shared_buffer.raw = blob
+
+    # force runner processes to use cpu
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     # create fifos and threads for all runners
     fifos = []
